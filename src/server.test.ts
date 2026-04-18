@@ -114,4 +114,57 @@ describe("createServer", () => {
 
     expect(observedAborted).toBe(false);
   });
+
+  it("forwards onUpdate partials as notifications/progress when client provides a progressToken", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "progress-sender",
+      description: "emits progress",
+      parameters: Type.Object({}),
+      async execute(_toolCallId, _params, _signal, onUpdate) {
+        onUpdate({ details: { phase: "running", elapsed: "1s" } });
+        onUpdate({ details: { phase: "done" } });
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    });
+
+    const { client, close } = await connectedPair(registry);
+    const onprogress = vi.fn();
+    try {
+      await client.callTool({ name: "progress-sender", arguments: {} }, undefined, {
+        onprogress,
+      });
+      expect(onprogress).toHaveBeenCalledTimes(2);
+      const first = onprogress.mock.calls[0]![0];
+      expect(first.progress).toBe(1);
+      expect(first.message).toMatch(/running/);
+      const second = onprogress.mock.calls[1]![0];
+      expect(second.progress).toBe(2);
+    } finally {
+      await close();
+    }
+  });
+
+  it("does not emit progress notifications when the client omits the progressToken", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "progress-sender-silent",
+      description: "emits progress",
+      parameters: Type.Object({}),
+      async execute(_toolCallId, _params, _signal, onUpdate) {
+        onUpdate({ details: { phase: "running" } });
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    });
+
+    const { client, close } = await connectedPair(registry);
+    const onprogress = vi.fn();
+    try {
+      // No onprogress passed → SDK does not attach a progressToken.
+      await client.callTool({ name: "progress-sender-silent", arguments: {} });
+      expect(onprogress).not.toHaveBeenCalled();
+    } finally {
+      await close();
+    }
+  });
 });

@@ -6,6 +6,7 @@ import { typeboxToJsonSchema } from "@/schema/typebox-to-json-schema.ts";
 import { createExecuteContext } from "@/api-mock/execute-context.ts";
 import type { ToolRegistry } from "@/registry/tool-registry.ts";
 import type { EventRouter } from "@/registry/event-router.ts";
+import type { ProgressParams } from "@/types/progress-params.ts";
 
 export interface ServerOptions {
   cwd?: string;
@@ -40,11 +41,21 @@ export function createServer(
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
+    const progressToken = request.params._meta?.progressToken;
+    const sendProgress =
+      progressToken !== undefined
+        ? (params: ProgressParams): Promise<void> =>
+            extra.sendNotification({
+              method: "notifications/progress",
+              params: { progressToken, ...params },
+            })
+        : undefined;
     return dispatchTool(registry, name, args ?? {}, {
       signal: extra.signal,
       cwd,
       notify,
       sessionId,
+      ...(sendProgress !== undefined && { sendProgress }),
     });
   });
 

@@ -693,10 +693,13 @@ inspect options:
 | 2026-04-18 | Tool の `details` 戻り値を MCP `CallToolResult.structuredContent` に forward（Codex P1）                                                                           | pi-autoresearch は全 3 ツールで `{content, details}` を返し、`details` に実験 state や実行メタデータ（commit、duration、metric 等）を入れる。dispatcher が content だけ返す形では MCP クライアントが構造化データを失う。`details === undefined` のときは `structuredContent` フィールドを付けない（MCP spec 準拠）                                                                                                               |
 | 2026-04-18 | `pi.exec` は spawn native signal/timeout に任せず、abort/timeout を手動 listen し SIGTERM→500ms→SIGKILL で段階送出（Codex P2a）                                    | §12.9。spec §2 の SIGKILL escalation 要件。/simplify で一度「spawn `{signal, timeout}` で足りる」と判断したが、実測で SIGTERM を trap する子プロセスが zombie 化することを Codex で検出                                                                                                                                                                                                                                          |
 | 2026-04-18 | `session_shutdown` の emit は `sessionAborter.abort()` より先に await する（Codex P2b）                                                                            | §12.10。abort を先に呼ぶと handler の `ctx.signal.aborted === true` で始まり、`pi.exec(..., {signal: ctx.signal})` 等のクリーンアップ処理が即座にキャンセルされる。emit→abort の順にすることで live signal で handler が走り、その後 signal が truthy になる                                                                                                                                                                     |
+| 2026-04-18 | Phase 3 のスコープは `onUpdate` → MCP `notifications/progress` 配線のみ（`ctx.ui.notify` / `registerCommand` は Phase 2 で前倒し済み）                             | §12.12。Phase 2 で実装した `notify` wiring と `registerCommand` Tool 化は spec §6.1 上は Phase 3 成果物だった。Phase 3 の新規作業は dispatcher/server の `sendProgress` 配線と E2E テストのみに絞った                                                                                                                                                                                                                            |
+| 2026-04-18 | 明示的 MCP-shape `{progress, total, message}` は verbatim 配信、`{details:{phase,elapsed}}` 等は counter ベース合成 + 単調性保証                                   | §12.13。tool が explicit に送った progress 値（0 や重複含む）は上書きしない。合成パス（fallback counter）は `lastProgress + 1` で単調増加を保証し、mixed shape（explicit → legacy）でも percent UI が後退しない                                                                                                                                                                                                                  |
+| 2026-04-18 | progress 送信は promise chain で直列化、flush は 5s timeout で race する                                                                                           | §12.13。fire-and-forget だと response より後に notification が到着し client 側で "unknown token" 扱いされる。無限 await は遅い/壊れた transport で hang する。2 つの Codex review round を経て「直列化 chain で順序保証 + 5s キャップ」の中庸案に収束                                                                                                                                                                            |
 
 ## 11. 進捗 (Progress)
 
-**最終更新:** 2026-04-18 / **現在位置:** Phase 2 完了、Phase 3 未着手。
+**最終更新:** 2026-04-18 / **現在位置:** Phase 3 完了、Phase 4 未着手。
 
 ### 完了済み (Phase 0-1)
 
@@ -720,10 +723,21 @@ inspect options:
 - **pi-autoresearch E2E**: 外部 path を `--extension` で指定。`tools/list` に 3 ツール + `command_autoresearch` が出て、`init → run "echo ok" → log` のフルパスで `autoresearch.jsonl` に記録される
 - **検証**: 12 テストファイル / 46 ケース GREEN、`pnpm typecheck` / `pnpm lint` クリーン（Codex review 3 指摘 = tool `details` → `structuredContent`、pi-exec SIGKILL 段階送出復活、`session_shutdown` emit→abort 順序 — すべて TDD で修正）
 
-### 未実装（Phase 3 以降）
+### 完了済み (Phase 3)
 
-- `onUpdate` → MCP `notifications/progress`
-- lifecycle events 残り 5 種（agent\*start / agent_end / session_tree / session_before_switch / before_agent_start）の発火経路
+- **`onUpdate` → MCP `notifications/progress`**: dispatcher 内で `sendProgress` optional 経由。`DispatchOptions.sendProgress?: (ProgressParams) => void | Promise<void>`
+- **Server 側の progressToken 抽出**: `request.params._meta?.progressToken` を読んで per-call で sendProgress を構築。未指定時は progress 配線全体が no-op
+- **2 種類の partial 形式に対応**:
+  - Explicit MCP shape `{progress, total?, message?}` → verbatim 配信（tool 供給値を一切 mutation しない）
+  - Legacy shape `{details: {phase, elapsed}}` 等 → counter ベースで合成、`lastProgress + 1` で単調増加を保証
+- **配送品質**: promise chain 直列化で発射順序保証、`Promise.race(chain, 5s-timeout)` で hang 防止、エラーは握り潰して tool 実行を妨げない。success / error path 両方で flush
+- **E2E**: InMemoryTransport 層で client の `onprogress` callback に progress 1..N が順序通り届くことを検証
+- **検証**: 12 テストファイル / 60 ケース GREEN、`pnpm typecheck` / `pnpm lint` クリーン。Codex review 5 ラウンド（P1 1 件、P2 6 件）すべて TDD 修正、round 6 で指摘 0 件収束
+
+### 未実装（Phase 4 以降）
+
+- lifecycle events 残り 5 種（agent_start / agent_end / session_tree / session_before_switch / before_agent_start）の発火経路
+- `tool_call` block hook / `tool_result` post-hook
 - `ctx.ui.setWidget` / `ctx.ui.custom` の実描画（MCP プリミティブ追加待ち）
 - `--strict` / `--timeout` / `inspect` サブコマンド
 - pi-autoresearch の snapshot 化と npm 公開（Phase 6）
@@ -805,3 +819,22 @@ child.on("error", (err) => console.log("error:", err.name, err.code));
 ### 12.11 Simplification passes can regress spec requirements
 
 §12.9 と §12.10 は、いずれも /simplify フェーズで「冗長」と判断した箇所を Codex /review が「spec 違反 / バグ」として引き戻した事例。§12.5 の loader error fidelity と合わせて 3 件目。パターン: **reviewer はコードの現在形を見て冗長性を判断するが、spec 要件（ここでは "SIGTERM→500ms→SIGKILL"）や意味論（ここでは "cleanup 中に signal は live"）まで照合しきれない**。対策は 2 つのレビュー層（/simplify と /codex:review）を直列で通すことで、単層では見落とす衝突を顕在化させる。Phase 1 でも §12.5 で同じ救済が効いており、本プロジェクトでは両層を回すのがデフォルトになる。
+
+### 12.12 Phase 3 成果物の大半は Phase 2 で前倒し実装されていた
+
+spec §6.1 の Phase 3 成果物は `registerCommand` Tool 化 + `ctx.ui.notify` → MCP notifications の 2 項目。Phase 2 で pi-autoresearch E2E を通すために最小限の `ctx.ui.notify` 配線（`server.sendLoggingMessage` への mapping）が必要になり、同時に `registerCommand` も `command_<name>` Tool として実装された。結果として Phase 3 の実作業は `onUpdate` → `notifications/progress` 配線 1 本に縮小（~9 日想定が ~1 日規模へ）。**spec 上のフェーズ境界と実装順序の非一致は自然に起こる**。Phase 単位の工数見積もりは「何を残して何を前倒すか」で前後すると割り切り、§11 の完了／未実装リストを実装実績に合わせて更新する運用で済ませる。
+
+### 12.13 MCP progress notification の配送品質は 5 ラウンドの review で収束した
+
+spec §2.1 は `onUpdate` の対応を Phase 3 送りとだけ書く。実装で判明した多層の設計空間:
+
+| 問題領域        | 素朴案                      | 問題点                                                  | 最終解                                                               |
+| --------------- | --------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------- |
+| tool → progress | counter の単純合成          | tool が明示的に送る `{progress, total, message}` を喪失 | explicit shape は verbatim、legacy shape は counter ベースで合成     |
+| 単調性          | explicit 値も強制的にバンプ | `{progress: 0, total: 100}` が `1/100` に化ける         | counter 側だけ `lastProgress + 1` で monotonic、explicit は verbatim |
+| 配送順序        | fire-and-forget             | 非同期送信で順序がズレる可能性                          | promise chain で直列化                                               |
+| 最終通知の drop | fire-and-forget             | response 到着後に notification が来ると client が drop  | finally で chain を await                                            |
+| hang 耐性       | 無限 await                  | 遅い transport で hang                                  | `Promise.race(chain, 5s-timeout)` で中庸                             |
+| error path      | success のみで flush        | tool throw 後の通知が drop                              | try/finally で error path でも flush                                 |
+
+Codex review を 5 ラウンド回して上記 6 問題を 1 つずつ顕在化 → TDD で順次解決。round 6 で指摘 0 件収束。**レビュー層を重ねることは正味のコスト（~7 TDD サイクル追加）だが、配送品質の実装責任を spec 側に押し戻さずサーバ側で完結させた**。将来、他拡張が異なる partial shape で onUpdate を呼んでも、`extractExplicitProgress` と `progressMessage` の 2 関数だけを拡張すれば対応できる。

@@ -1,4 +1,4 @@
-export type EventHandler = (...args: unknown[]) => void | Promise<void>;
+export type EventHandler = (...args: unknown[]) => unknown;
 
 export class EventRouter {
   private readonly handlers = new Map<string, EventHandler[]>();
@@ -20,5 +20,9 @@ export class EventRouter {
         process.stderr.write(`[pi-mcp-export] handler for "${event}" threw: ${message}\n`);
       }
     }
+  }
+
+  handlersOf(event: string): ReadonlyArray<EventHandler> {
+    return this.handlers.get(event) ?? [];
   }
 }

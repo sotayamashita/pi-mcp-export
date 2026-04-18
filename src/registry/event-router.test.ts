@@ -41,4 +41,19 @@ describe("EventRouter", () => {
       stderrSpy.mockRestore();
     }
   });
+
+  it("handlersOf returns an empty readonly array for events with no registered handlers", () => {
+    const router = new EventRouter();
+    expect(router.handlersOf("tool_call")).toEqual([]);
+  });
+
+  it("handlersOf returns registered handlers in registration order", () => {
+    const router = new EventRouter();
+    const a = (): void => {};
+    const b = (): void => {};
+    router.on("tool_call", a);
+    router.on("tool_call", b);
+
+    expect(router.handlersOf("tool_call")).toEqual([a, b]);
+  });
 });

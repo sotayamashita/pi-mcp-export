@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Type } from "@sinclair/typebox";
 import { ToolRegistry } from "@/registry/tool-registry.ts";
+import { EventRouter } from "@/registry/event-router.ts";
 import { dispatchTool } from "./tool-dispatcher.ts";
 import type { ToolDef } from "@/types/tool-def.ts";
 
@@ -552,5 +553,637 @@ describe("dispatchTool", () => {
 
     expect(result).toEqual({ content: [{ type: "text", text: "still-done" }] });
     expect(sendProgress).toHaveBeenCalled();
+  });
+
+  it("fires tool_call pre-hook with the event shape {type, toolCallId, toolName, input} before execute", async () => {
+    const events = new EventRouter();
+    const preHook = vi.fn();
+    events.on("tool_call", preHook);
+    const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "done" }] });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "greet",
+      parameters: Type.Object({ name: Type.String() }),
+      execute,
+    } satisfies ToolDef);
+
+    await dispatchTool(
+      registry,
+      "greet",
+      { name: "world" },
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(preHook).toHaveBeenCalledTimes(1);
+    const [event, ctx] = preHook.mock.calls[0]!;
+    expect(event).toMatchObject({
+      type: "tool_call",
+      toolName: "greet",
+      input: { name: "world" },
+    });
+    expect(typeof event.toolCallId).toBe("string");
+    expect(ctx).toBeDefined();
+    expect(preHook.mock.invocationCallOrder[0]).toBeLessThan(execute.mock.invocationCallOrder[0]!);
+  });
+
+  it("returns an MCP error and skips execute when a tool_call handler returns block: true", async () => {
+    const events = new EventRouter();
+    events.on("tool_call", () => ({ block: true, reason: "policy forbids" }));
+    const execute = vi.fn();
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "forbidden",
+      parameters: Type.Object({}),
+      execute,
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "forbidden",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      isError: true,
+      content: [{ type: "text", text: expect.stringContaining("policy forbids") }],
+    });
+  });
+
+  it("does not invoke subsequent tool_call handlers after the first returns block: true", async () => {
+    const events = new EventRouter();
+    events.on("tool_call", () => ({ block: true, reason: "nope" }));
+    const second = vi.fn();
+    events.on("tool_call", second);
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "blocked",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text", text: "should not run" }] };
+      },
+    } satisfies ToolDef);
+
+    await dispatchTool(
+      registry,
+      "blocked",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  it("passes the mutated input from tool_call handlers into tool.execute", async () => {
+    const events = new EventRouter();
+    events.on("tool_call", (event) => {
+      const e = event as { input: Record<string, unknown> };
+      e.input["name"] = "mutated";
+    });
+    const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "done" }] });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "echo",
+      parameters: Type.Object({ name: Type.String() }),
+      execute,
+    } satisfies ToolDef);
+
+    await dispatchTool(
+      registry,
+      "echo",
+      { name: "original" },
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    const [, params] = execute.mock.calls[0]!;
+    expect(params).toEqual({ name: "mutated" });
+  });
+
+  it("fires tool_result post-hook after execute with the full event shape", async () => {
+    const events = new EventRouter();
+    const postHook = vi.fn();
+    events.on("tool_result", postHook);
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "summarize",
+      parameters: Type.Object({ topic: Type.String() }),
+      async execute() {
+        return {
+          content: [{ type: "text", text: "summary body" }],
+          details: { tokens: 42 },
+        };
+      },
+    } satisfies ToolDef);
+
+    await dispatchTool(
+      registry,
+      "summarize",
+      { topic: "phase-4" },
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(postHook).toHaveBeenCalledTimes(1);
+    const [event] = postHook.mock.calls[0]!;
+    expect(event).toMatchObject({
+      type: "tool_result",
+      toolName: "summarize",
+      input: { topic: "phase-4" },
+      content: [{ type: "text", text: "summary body" }],
+      details: { tokens: 42 },
+      isError: false,
+    });
+  });
+
+  it("applies partial overrides (content/details/isError) from tool_result handlers", async () => {
+    const events = new EventRouter();
+    events.on("tool_result", () => ({
+      content: [{ type: "text", text: "redacted" }],
+      details: { redacted: true },
+    }));
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "sensitive",
+      parameters: Type.Object({}),
+      async execute() {
+        return {
+          content: [{ type: "text", text: "original" }],
+          details: { secret: "shh" },
+        };
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "sensitive",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(result).toEqual({
+      content: [{ type: "text", text: "redacted" }],
+      structuredContent: { redacted: true },
+    });
+  });
+
+  it("chains multiple tool_result handlers so each sees prior mutations", async () => {
+    const events = new EventRouter();
+    const seen: Array<{ type: string; content: unknown }> = [];
+    events.on("tool_result", (event) => {
+      const e = event as { content: unknown };
+      seen.push({ type: "first", content: e.content });
+      return { content: [{ type: "text", text: "mutated-by-first" }] };
+    });
+    events.on("tool_result", (event) => {
+      const e = event as { content: unknown };
+      seen.push({ type: "second", content: e.content });
+      return undefined;
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "chained",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text", text: "original" }] };
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "chained",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(seen[0]!.content).toEqual([{ type: "text", text: "original" }]);
+    expect(seen[1]!.content).toEqual([{ type: "text", text: "mutated-by-first" }]);
+    expect(result).toEqual({ content: [{ type: "text", text: "mutated-by-first" }] });
+  });
+
+  it("fails closed: tool_call handler throw blocks execute with a 'handler crashed' error", async () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      const events = new EventRouter();
+      events.on("tool_call", () => {
+        throw new Error("policy misconfigured");
+      });
+      const execute = vi.fn();
+      const registry = new ToolRegistry();
+      registry.register({
+        name: "sensitive",
+        parameters: Type.Object({}),
+        execute,
+      } satisfies ToolDef);
+
+      const result = await dispatchTool(
+        registry,
+        "sensitive",
+        {},
+        {
+          signal: new AbortController().signal,
+          cwd: process.cwd(),
+          notify: () => {},
+          events,
+        },
+      );
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ isError: true });
+      const text = (result.content as Array<{ text: string }>)[0]!.text;
+      expect(text).toMatch(/policy misconfigured|blocked/i);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("fires tool_call and tool_result hooks even for unknown tool names (audit visibility)", async () => {
+    const events = new EventRouter();
+    const preHook = vi.fn();
+    const postHook = vi.fn();
+    events.on("tool_call", preHook);
+    events.on("tool_result", postHook);
+    const registry = new ToolRegistry();
+
+    const result = await dispatchTool(
+      registry,
+      "nonexistent",
+      { q: 1 },
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(preHook).toHaveBeenCalledTimes(1);
+    expect(preHook.mock.calls[0]![0]).toMatchObject({
+      type: "tool_call",
+      toolName: "nonexistent",
+      input: { q: 1 },
+    });
+    expect(postHook).toHaveBeenCalledTimes(1);
+    expect(postHook.mock.calls[0]![0]).toMatchObject({
+      type: "tool_result",
+      toolName: "nonexistent",
+      isError: true,
+    });
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringContaining("nonexistent") }],
+    });
+  });
+
+  it("falls back to a deep JSON snapshot when structuredClone fails (function injection)", async () => {
+    const events = new EventRouter();
+    let observedFilter: unknown;
+    events.on("tool_call", (event) => {
+      const e = event as { input: Record<string, unknown> };
+      e.input["fn"] = (): void => {};
+    });
+    events.on("tool_result", (event) => {
+      const e = event as { input: { filter: { enabled: boolean } } };
+      observedFilter = { ...e.input.filter };
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "nested-after-fn",
+      parameters: Type.Object({ filter: Type.Object({ enabled: Type.Boolean() }) }),
+      async execute(_toolCallId, params) {
+        (params as { filter: { enabled: boolean } }).filter.enabled = false;
+        return { content: [{ type: "text", text: "done" }] };
+      },
+    } satisfies ToolDef);
+
+    await dispatchTool(
+      registry,
+      "nested-after-fn",
+      { filter: { enabled: true } },
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(observedFilter).toEqual({ enabled: true });
+  });
+
+  it("falls back to a shallow snapshot when input is not structured-cloneable", async () => {
+    const events = new EventRouter();
+    let observedInput: Record<string, unknown> | undefined;
+    events.on("tool_call", (event) => {
+      const e = event as { input: Record<string, unknown> };
+      e.input["attachment"] = (): void => {};
+    });
+    events.on("tool_result", (event) => {
+      observedInput = { ...(event as { input: Record<string, unknown> }).input };
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "fn-mutator",
+      parameters: Type.Object({ label: Type.String() }),
+      async execute() {
+        return { content: [{ type: "text", text: "done" }] };
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "fn-mutator",
+      { label: "hello" },
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(result).not.toHaveProperty("isError");
+    expect(observedInput).toBeDefined();
+    expect(observedInput!["label"]).toBe("hello");
+  });
+
+  it("tool_result.input deep-clones so nested mutation by execute cannot leak into hooks", async () => {
+    const events = new EventRouter();
+    let observedFilter: unknown;
+    events.on("tool_result", (event) => {
+      const e = event as { input: { filter: { enabled: boolean } } };
+      observedFilter = { ...e.input.filter };
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "nested-mutator",
+      parameters: Type.Object({ filter: Type.Object({ enabled: Type.Boolean() }) }),
+      async execute(_toolCallId, params) {
+        (params as { filter: { enabled: boolean } }).filter.enabled = false;
+        return { content: [{ type: "text", text: "done" }] };
+      },
+    } satisfies ToolDef);
+
+    await dispatchTool(
+      registry,
+      "nested-mutator",
+      { filter: { enabled: true } },
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(observedFilter).toEqual({ enabled: true });
+  });
+
+  it("deny-by-default survives in-place mutation of the event by tool_result handlers", async () => {
+    const events = new EventRouter();
+    events.on("tool_call", () => ({ block: true, reason: "nope" }));
+    events.on("tool_result", (event) => {
+      const e = event as {
+        isError: boolean;
+        content: Array<{ type: "text"; text: string }>;
+      };
+      e.isError = false;
+      if (e.content[0]) e.content[0].text = "sneaky success";
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "guarded",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text", text: "never" }] };
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "guarded",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringContaining("nope") }],
+    });
+  });
+
+  it("ignores tool_result handler overrides when the call was blocked (deny-by-default)", async () => {
+    const events = new EventRouter();
+    events.on("tool_call", () => ({ block: true, reason: "denied by policy" }));
+    const postHook = vi.fn(() => ({
+      isError: false,
+      content: [{ type: "text", text: "faked success" }],
+    }));
+    events.on("tool_result", postHook);
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "guarded",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text", text: "should never run" }] };
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "guarded",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(postHook).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringContaining("denied by policy") }],
+    });
+  });
+
+  it("fires tool_result on blocked tool calls so audit/redaction hooks still observe them", async () => {
+    const events = new EventRouter();
+    events.on("tool_call", () => ({ block: true, reason: "denied" }));
+    const postHook = vi.fn();
+    events.on("tool_result", postHook);
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "auditable",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text", text: "should not run" }] };
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "auditable",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(postHook).toHaveBeenCalledTimes(1);
+    const [event] = postHook.mock.calls[0]!;
+    expect(event).toMatchObject({
+      type: "tool_result",
+      toolName: "auditable",
+      isError: true,
+    });
+    expect(result).toMatchObject({ isError: true });
+  });
+
+  it("tool_result.input is a snapshot unaffected by execute mutating its params", async () => {
+    const events = new EventRouter();
+    let observedInput: unknown;
+    events.on("tool_result", (event) => {
+      observedInput = { ...(event as { input: Record<string, unknown> }).input };
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "mutator",
+      parameters: Type.Object({ x: Type.Number() }),
+      async execute(_toolCallId, params) {
+        (params as { x: number }).x = 999;
+        return { content: [{ type: "text", text: "done" }] };
+      },
+    } satisfies ToolDef);
+
+    await dispatchTool(
+      registry,
+      "mutator",
+      { x: 1 },
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(observedInput).toEqual({ x: 1 });
+  });
+
+  it("preserves tool_result handler details override even when result stays isError: true", async () => {
+    const events = new EventRouter();
+    events.on("tool_result", () => ({
+      details: { errorCode: "E_DENIED", hint: "retry after auth" },
+    }));
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "failing",
+      parameters: Type.Object({}),
+      async execute() {
+        throw new Error("nope");
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "failing",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: "nope" }],
+      structuredContent: { errorCode: "E_DENIED", hint: "retry after auth" },
+    });
+  });
+
+  it("fires tool_result with isError: true when execute throws and allows handler override", async () => {
+    const events = new EventRouter();
+    let observedIsError: boolean | undefined;
+    let observedContent: unknown;
+    events.on("tool_result", (event) => {
+      const e = event as { isError: boolean; content: unknown };
+      observedIsError = e.isError;
+      observedContent = e.content;
+      return {
+        content: [{ type: "text", text: "handled gracefully" }],
+        isError: false,
+      };
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "boom",
+      parameters: Type.Object({}),
+      async execute() {
+        throw new Error("kaboom");
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "boom",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        events,
+      },
+    );
+
+    expect(observedIsError).toBe(true);
+    expect(observedContent).toEqual([{ type: "text", text: "kaboom" }]);
+    expect(result).toEqual({ content: [{ type: "text", text: "handled gracefully" }] });
   });
 });

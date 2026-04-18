@@ -145,6 +145,35 @@ describe("createServer", () => {
     }
   });
 
+  it("fires tool_call hooks through the real MCP dispatch path (block propagates to client)", async () => {
+    const events = new EventRouter();
+    events.on("tool_call", () => ({ block: true, reason: "denied by policy" }));
+    const registry = new ToolRegistry();
+    const execute = vi.fn();
+    registry.register({
+      name: "sensitive",
+      description: "blocked tool",
+      parameters: Type.Object({}),
+      execute,
+    });
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createServer(registry, events);
+    const client = new Client({ name: "hook-test", version: "0.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: "sensitive", arguments: {} });
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: expect.stringContaining("denied by policy") }],
+      });
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("does not emit progress notifications when the client omits the progressToken", async () => {
     const registry = new ToolRegistry();
     registry.register({

@@ -56,6 +56,7 @@ export function createServer(
       notify,
       sessionId,
       ...(sendProgress !== undefined && { sendProgress }),
+      ...(events !== undefined && { events }),
     });
   });
 

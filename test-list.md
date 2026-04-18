@@ -88,10 +88,45 @@
 - [x] 6. `_meta.progressToken` 指定時に `extra.sendNotification({method: "notifications/progress", params: {progressToken, progress, message?}})` が呼ばれる
 - [x] 7. `_meta.progressToken` 未指定時は `extra.sendNotification` を一切呼ばない
 
-## Phase 4 以降で扱う予定
+## Phase 4 ✓
 
-- lifecycle events 残り 5 種類（agent_start / agent_end / session_tree / session_before_switch / before_agent_start）
-- `tool_call` block hook / `tool_result` post-hook
+**Status:** 全 81 ケース GREEN（Phase 1 の 23 + Phase 2 の 23 + Phase 3 の 14 + Phase 4 の 21）。`pnpm test` / `typecheck` / `lint` クリーン。`before_agent_start` / `agent_*` / `session_tree` / `session_before_switch` / `turn_*` / `session_before_compact` / `resources_discover` は MCP 側に対応経路がないため永続 deferred として spec §10 に確定記録。Codex review を 8 ラウンド回し P1 3 件 / P2 7 件を TDD 修正、round 9 で cyclic-input + function-injection の組合せのみ documented limitation として残す。
+
+### 層 1: EventRouter
+
+- [x] 1. handlersOf は未登録 event に対して空配列を返す
+- [x] 2. handlersOf は登録順で handler を返す
+
+### 層 2: Dispatcher tool_call pre-hook
+
+- [x] 3. execute の前に event `{type: "tool_call", toolCallId, toolName, input}` と ctx を渡して handler を発火
+- [x] 4. handler が `{block: true, reason}` を返すと execute を skip し `{isError: true, content: [{text: 含 reason}]}` を返す
+- [x] 5. 先頭 handler の block で後続 handler は呼ばれない
+- [x] 6. handler が `event.input` を mutate すると execute は mutated input を受け取る
+
+### 層 3: Dispatcher tool_result post-hook
+
+- [x] 7. execute 後に event `{type: "tool_result", toolCallId, toolName, input, content, details, isError}` と ctx を渡して handler を発火
+- [x] 8. handler が `{content?, details?, isError?}` を返すと結果に部分上書きされる
+- [x] 9. 複数 handler がチェインし、2 番目は 1 番目の mutation を反映した event を受ける
+- [x] 10. execute が throw しても tool_result は `isError: true` で発火し、handler の返値で result を置き換え可能
+
+### 層 4: Codex review 対応（P1 3 件 / P2 7 件）
+
+- [x] 11. (Codex round 1 P1) server.ts の CallTool handler から events を dispatchTool に渡す
+- [x] 12. (Codex round 1 P2) post-hook が details を上書きしたとき、isError: true でも structuredContent を返す
+- [x] 13. (Codex round 2 P2) blocked 呼び出しでも tool_result を発火（audit 可視性）
+- [x] 14. (Codex round 2 P2) tool_result.input は execute の params 参照とは別スナップショット
+- [x] 15. (Codex round 3 P1) tool_call handler が throw したら fail-closed で block
+- [x] 16. (Codex round 3 P2) tool_result.input を deep-clone で nested mutation から守る
+- [x] 17. (Codex round 4 P2) structuredClone が失敗しても tool 実行を継続（fallback）
+- [x] 18. (Codex round 5 P2) 未知 tool でも tool_call/tool_result を発火（audit 可視性）
+- [x] 19. (Codex round 5 P2) cloneInput の fallback は JSON deep-copy を優先
+- [x] 20. (Codex round 6 P1) blocked の場合 tool_result handler の return 値は無視（deny-by-default）
+- [x] 21. (Codex round 7 P1) blocked の場合 event.content の in-place mutation も無視（deep clone）
+
+## Phase 5 以降で扱う予定
+
 - `ctx.ui.setWidget` / `ctx.ui.custom` の実描画（MCP プリミティブ追加待ち）
 - `--strict` / `--timeout` / `inspect` サブコマンド
 - npm 公開、pi-autoresearch の snapshot 化

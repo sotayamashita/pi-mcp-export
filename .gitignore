@@ -148,3 +148,11 @@ vite.config.ts.timestamp-*
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Skills
+skills-lock.json
+.agents/skills
+.claude/skills
+
+# Local TDD tracking (not part of the shipped project)
+test-list.md

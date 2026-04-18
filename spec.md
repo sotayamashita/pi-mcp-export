@@ -754,7 +754,7 @@ inspect options:
 
 ### トラッキング資料
 
-- `test-list.md` — Phase 1 / Phase 2 テストケース状態
+- `test-list.md` — ローカル TDD トラッキング（gitignore 済み、手元の作業履歴のみ）
 - `/Users/sotayamashita/.claude/plans/eventual-sniffing-glacier.md` — 直近のフェーズプラン
 - `@10 決定ログ` — 日付順の決定履歴
 - `@12 Surprises & Discoveries` — 実装で判明した spec 設計時点の未見通し事項

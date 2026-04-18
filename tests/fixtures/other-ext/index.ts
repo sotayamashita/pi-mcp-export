@@ -6,7 +6,7 @@ export default function (pi: ExtensionApi): void {
     name: "farewell",
     description: "Bids farewell to the given name",
     parameters: Type.Object({ name: Type.String() }),
-    async execute(params) {
+    async execute(_toolCallId, params) {
       const { name } = params as { name: string };
       return { content: [{ type: "text", text: `goodbye, ${name}` }] };
     },

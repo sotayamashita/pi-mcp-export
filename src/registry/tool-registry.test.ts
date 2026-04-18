@@ -37,4 +37,21 @@ describe("ToolRegistry", () => {
 
     expect(registry.list()).toEqual([a, b]);
   });
+
+  it("preserves optional pi-specific fields (label, promptSnippet, promptGuidelines)", () => {
+    const registry = new ToolRegistry();
+    const tool: ToolDef = {
+      name: "rich",
+      label: "Rich Tool",
+      description: "described",
+      promptSnippet: "snippet",
+      promptGuidelines: ["a", "b"],
+      parameters: Type.Object({}),
+      execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+    };
+
+    registry.register(tool);
+
+    expect(registry.get("rich")).toEqual(tool);
+  });
 });

@@ -684,31 +684,54 @@ inspect options:
 | 2026-04-18 | `package.json.bin.pi-mcp-export: ./bin/pi-mcp-export.mjs` を宣言                                                                                                   | spec §1.4 成功条件 1「`pi-mcp-export serve --extension <path>` で起動」を `npm install -g` 経由で満たすため。静的テスト (`tests/package-bin.test.ts`) で bin マップと target の実在を検証                                                                                                                                                                                                                                        |
 | 2026-04-18 | `--extension <path>` の `<path>` がディレクトリのとき `<path>/index.ts` に解決する                                                                                 | spec §6.3 は file/directory 扱いを未指定。pi 本体が `~/.pi/agent/extensions/<name>/index.ts` 規約なので合わせる。エラーは `ENOENT` のみ握りつぶし、それ以外（EACCES 等）は propagate                                                                                                                                                                                                                                             |
 | 2026-04-18 | jiti の `@/*` alias は `bin/pi-mcp-export.mjs` で明示注入                                                                                                          | §12.2。jiti 2.x は tsconfig `paths` を自動読み取りしないため。拡張側で絶対 import を許したければ同じ alias 注入が必要                                                                                                                                                                                                                                                                                                            |
+| 2026-04-18 | Tool `execute` シグネチャを pi の正式形 `(toolCallId, params, signal, onUpdate, ctx)` に統一                                                                       | Phase 1 の単引数形は最小動作用。pi-autoresearch など実拡張はこの 5 引数形を前提とし、`ctx.ui.notify` / `ctx.cwd` / `ctx.signal` を実際に touch する。ToolDef も `label` / `promptSnippet` / `promptGuidelines` / `details?` を optional 化                                                                                                                                                                                       |
+| 2026-04-18 | `pi.registerCommand("x", ...)` を Tool 名 `command_x` として Registry に露出                                                                                       | spec §4.3 案 A。Phase 3 以降で MCP Prompt 成熟を待つが、Phase 2 は Tool 化で即可搬                                                                                                                                                                                                                                                                                                                                               |
+| 2026-04-18 | `pi.on(event, handler)` は全 event 登録を受け入れるが、発火するのは `session_start` / `session_shutdown` のみ                                                      | spec §4.4 の写像。他イベントは Phase 3-4 で発火経路を追加。emit signature は `(name, eventObj, ctx)` variadic                                                                                                                                                                                                                                                                                                                    |
+| 2026-04-18 | `ctx.ui.setWidget` / `ctx.ui.custom` は shape-preserving no-op（custom は `undefined` で即 resolve）                                                               | spec §2.2 非対応。pi-autoresearch の blocking overlay は shortcut 経路なので本プランでは発火しない                                                                                                                                                                                                                                                                                                                               |
+| 2026-04-18 | pi-autoresearch は `tests/fixtures/` に snapshot せず、外部 path を直接 `--extension` に渡す                                                                       | spec §6.2 の snapshot 計画は Phase 6（npm 公開準備）で再考。開発中は外部 path のほうがバージョン固定不要 + `node_modules` も外部 repo のものが自然に解決。E2E テストは `existsSync` で検出・非存在環境は `describe.skip`                                                                                                                                                                                                         |
+| 2026-04-18 | `ctx.sessionManager.getBranch()` は同期 iterable を返す (`ReadonlyArray<unknown>`、Phase 2 では `[]`)                                                              | §12.7。命名に反し実体は「セッション履歴ツリーの分岐エントリ列」。pi-autoresearch は `for (const entry of ctx.sessionManager.getBranch())` で同期反復するため async / null では TypeError                                                                                                                                                                                                                                         |
+| 2026-04-18 | Tool の `details` 戻り値を MCP `CallToolResult.structuredContent` に forward（Codex P1）                                                                           | pi-autoresearch は全 3 ツールで `{content, details}` を返し、`details` に実験 state や実行メタデータ（commit、duration、metric 等）を入れる。dispatcher が content だけ返す形では MCP クライアントが構造化データを失う。`details === undefined` のときは `structuredContent` フィールドを付けない（MCP spec 準拠）                                                                                                               |
+| 2026-04-18 | `pi.exec` は spawn native signal/timeout に任せず、abort/timeout を手動 listen し SIGTERM→500ms→SIGKILL で段階送出（Codex P2a）                                    | §12.9。spec §2 の SIGKILL escalation 要件。/simplify で一度「spawn `{signal, timeout}` で足りる」と判断したが、実測で SIGTERM を trap する子プロセスが zombie 化することを Codex で検出                                                                                                                                                                                                                                          |
+| 2026-04-18 | `session_shutdown` の emit は `sessionAborter.abort()` より先に await する（Codex P2b）                                                                            | §12.10。abort を先に呼ぶと handler の `ctx.signal.aborted === true` で始まり、`pi.exec(..., {signal: ctx.signal})` 等のクリーンアップ処理が即座にキャンセルされる。emit→abort の順にすることで live signal で handler が走り、その後 signal が truthy になる                                                                                                                                                                     |
 
 ## 11. 進捗 (Progress)
 
-**最終更新:** 2026-04-18 / **現在位置:** Phase 1 完了、Phase 2 未着手。
+**最終更新:** 2026-04-18 / **現在位置:** Phase 2 完了、Phase 3 未着手。
 
 ### 完了済み (Phase 0-1)
 
 - **リポジトリ足場**: pnpm / husky / commitlint / secretlint / oxfmt / oxlint / vitest / nano-staged / TypeScript（strict + exactOptionalPropertyTypes 等）、Node 20+ LTS ESM、`@types/node` exact pin
 - **CLI**: `pi-mcp-export serve --extension <path>` 動作。`--extension` は繰り返し可（複数拡張同時 load）。`package.json.bin` で `npm install -g` から起動可能
-- **ExtensionAPI カバー範囲**:
+- **ExtensionAPI カバー範囲（Phase 1）**:
   - `pi.registerTool(def)` の受付と MCP `tools/list` / `tools/call` への露出
-  - TypeBox → JSON Schema 変換（実装は §12.1 の透過方式により Phase 2 の Array/Union/Optional/Literal も自動対応）
-  - `registerShortcut` = no-op + stderr 警告（未対応 API プロトタイプ）
+  - TypeBox → JSON Schema 変換（§12.1 の透過方式により Phase 2 の Array/Union/Optional/Literal も自動対応）
+  - `registerShortcut` = no-op + stderr 警告
   - jiti 経由の拡張評価、`bin/pi-mcp-export.mjs` で `@/*` alias 注入
   - stdio MCP サーバ、in-memory 統合テスト、`child_process` による CLI e2e
-- **検証**: 8 テストファイル / 23 ケース GREEN、`pnpm typecheck` エラー 0、`pnpm lint` 警告 0
 
-### 未実装（Phase 2 以降）
+### 完了済み (Phase 2)
 
-spec §6.1 の Phase 2-7 は未着手。直近のネクストは **Phase 2 = pi-autoresearch 実拡張で E2E 通す**。Phase 1 終了時点での reforecast は Phase 2 完了後に §0.4 撤退条件表と照合する。
+- **Tool `execute` シグネチャを 5 引数化**（`toolCallId, params, signal, onUpdate, ctx`）。ToolDef も pi-autoresearch の実フィールド（`label`, `promptSnippet`, `promptGuidelines`, `details?`）を optional 受け入れ
+- **`pi.exec`**: `node:child_process.spawn` ラッパ。cwd / signal / timeout / env 対応、SIGTERM → 500ms → SIGKILL
+- **EventRouter** + **`pi.on`**: 全 event 登録可、`session_start` / `session_shutdown` は server lifecycle で実発火（emit signature `(eventObj, ctx)`）
+- **`pi.registerCommand`**: Tool 名 `command_<name>` として Registry に露出（spec §4.3 案 A）
+- **`ExecuteContext` builder**: cwd / signal / hasUI=false / hasTerminal=false / ui.notify（MCP `sendLoggingMessage` 経由） / setWidget・custom の no-op / getContextUsage スタブ / sessionManager（getSessionId 定数、getBranch 空配列）
+- **MCP `tools/call` → signal + notify wire**: SDK `setRequestHandler(schema, (req, extra) => ...)` の `extra.signal` を dispatcher 経由で tool に渡す。`ctx.ui.notify` は `server.sendLoggingMessage({level, data})` へ
+- **pi-autoresearch E2E**: 外部 path を `--extension` で指定。`tools/list` に 3 ツール + `command_autoresearch` が出て、`init → run "echo ok" → log` のフルパスで `autoresearch.jsonl` に記録される
+- **検証**: 12 テストファイル / 46 ケース GREEN、`pnpm typecheck` / `pnpm lint` クリーン（Codex review 3 指摘 = tool `details` → `structuredContent`、pi-exec SIGKILL 段階送出復活、`session_shutdown` emit→abort 順序 — すべて TDD で修正）
+
+### 未実装（Phase 3 以降）
+
+- `onUpdate` → MCP `notifications/progress`
+- lifecycle events 残り 5 種（agent\*start / agent_end / session_tree / session_before_switch / before_agent_start）の発火経路
+- `ctx.ui.setWidget` / `ctx.ui.custom` の実描画（MCP プリミティブ追加待ち）
+- `--strict` / `--timeout` / `inspect` サブコマンド
+- pi-autoresearch の snapshot 化と npm 公開（Phase 6）
 
 ### トラッキング資料
 
-- `test-list.md` — テストケース 1–20 の実装状況
-- `/Users/sotayamashita/.claude/plans/eventual-sniffing-glacier.md` — Phase 1 実装プラン
+- `test-list.md` — Phase 1 / Phase 2 テストケース状態
+- `/Users/sotayamashita/.claude/plans/eventual-sniffing-glacier.md` — 直近のフェーズプラン
 - `@10 決定ログ` — 日付順の決定履歴
 - `@12 Surprises & Discoveries` — 実装で判明した spec 設計時点の未見通し事項
 
@@ -739,3 +762,46 @@ pi 本体と同じランタイム（jiti）を採用したが、jiti 2.x は tsc
 ### 12.6 ExtensionAPI type drift risk in fixtures
 
 当初 fixture は `ExtensionApiLike` として ExtensionAPI 形状を手書きしていたが、本体の `ExtensionApi` が進化すると fixture が silent drift する（§6.2 のテスト戦略における fixture 品質リスク）。`import type { ExtensionApi } from "@/api-mock/extension-api.ts"` で本体型と結合する形に統一。jiti の alias 注入（§12.2）がこの import を解決する。
+
+### 12.7 `ctx.sessionManager.getBranch()` is a session-history iterable, not git
+
+Phase 2 で pi-autoresearch の `session_start` handler がロード直後に `ctx.sessionManager.getBranch is not a function or its return value is not iterable` で throw した。API 名から「git branch 名を返す」と誤読し、最初 `Promise<string | null>` として実装したのが原因。実体は **セッション履歴ツリーの「現在ブランチ」に沿ったエントリ列** で、pi-autoresearch は `for (const entry of ctx.sessionManager.getBranch())` と同期反復する。`ReadonlyArray<unknown>`（Phase 2 では `[]`）を同期返却する形に修正。ExtensionAPI の命名が機能ドメインを強く示唆しても、実装を確認してから型を決めるべき、という教訓。
+
+### 12.8 pi-autoresearch loads cleanly despite large unsupported API surface
+
+Phase 2 開始前の調査で pi-autoresearch は ExtensionAPI を 10+ 箇所で touch すると判明（setWidget / custom / on × 7 / registerCommand / exec / abort / getContextUsage / sessionManager）していた。ロード時点で全欠落するとクラッシュする懸念があったが、実装順に層を積んだ結果、最終的な Phase 2 実装では:
+
+- 実装: registerTool / registerCommand / on / exec / notify / getContextUsage / sessionManager の最小形
+- 無害 no-op: setWidget / custom / abort / registerShortcut
+- 未発火: agent\_\* / session_tree / session_before_switch / before_agent_start
+
+これで pi-autoresearch の 3 ツール（+ command_autoresearch）が E2E 通過。**「すべて実装しないと動かない」前提が実測で崩れ、spec §2.1 の P0/P1/P2 階層が現実的に機能する**ことを確認できた。将来拡張（pi-mcp-adapter、safe-git 等）でも同様に段階的対応が可能と見込める。
+
+### 12.9 Node's `spawn({signal})` does not actually kill processes that trap SIGTERM
+
+Phase 2 /simplify で「spawn の native `signal` option に任せれば手書きの abort listener は不要」と判断し、手書き SIGTERM→SIGKILL 段階送出を削除した。Codex /review で検証: Node は abort 時に SIGTERM を 1 回送るだけで、子プロセスが `process.on("SIGTERM", () => {})` で握り潰すと **Node は `error: AbortError` を emit して追跡を諦めるが、子プロセスは生存し続ける**（zombie）。`killed=true` を返しながら実際はリークしている状態。
+
+検出手順:
+
+```javascript
+const controller = new AbortController();
+const child = spawn(
+  "node",
+  ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
+  { signal: controller.signal, stdio: ["ignore", "pipe", "pipe"] },
+);
+child.on("error", (err) => console.log("error:", err.name, err.code));
+// → abort 後すぐ `error: AbortError ABORT_ERR` を emit。close は来ない。
+```
+
+修正: abort/timeout を手動 listen し、SIGTERM 即送 → 500ms 後 SIGKILL 送出の段階処理を維持。spec §2 の "SIGTERM→500ms→SIGKILL" 要件は "簡素化して native 任せ" で満たせないことが実測された。
+
+### 12.10 Shutdown signal: abort-before-emit cancels cleanup work
+
+`session_shutdown` handler が pi.exec や fetch 等の **cleanup 処理を `ctx.signal` に紐づけて実行する** ことを想定した場合、emit の前に `sessionAborter.abort()` を呼ぶと、cleanup 処理が起動直後に即キャンセルされる。「signal を abort することで shutdown を通知する」という直感は handler 側の責務を誤って狭める。
+
+修正: `void (async () => { try { await events.emit(...) } finally { sessionAborter.abort(); } })()`。handler が live signal で走り、完了後に signal が truthy になる。handler が signal abort を検知したいなら代替経路（例: `events.emit("shutdown-pending")` のようなセマンティックイベント）を用意する。Phase 2 は deferred。
+
+### 12.11 Simplification passes can regress spec requirements
+
+§12.9 と §12.10 は、いずれも /simplify フェーズで「冗長」と判断した箇所を Codex /review が「spec 違反 / バグ」として引き戻した事例。§12.5 の loader error fidelity と合わせて 3 件目。パターン: **reviewer はコードの現在形を見て冗長性を判断するが、spec 要件（ここでは "SIGTERM→500ms→SIGKILL"）や意味論（ここでは "cleanup 中に signal は live"）まで照合しきれない**。対策は 2 つのレビュー層（/simplify と /codex:review）を直列で通すことで、単層では見落とす衝突を顕在化させる。Phase 1 でも §12.5 で同じ救済が効いており、本プロジェクトでは両層を回すのがデフォルトになる。

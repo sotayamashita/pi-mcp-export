@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ToolRegistry } from "@/registry/tool-registry.ts";
+import { EventRouter } from "@/registry/event-router.ts";
 import { loadExtension } from "@/loader.ts";
 import { createServer } from "@/server.ts";
 
@@ -33,10 +34,11 @@ async function run(): Promise<void> {
     )
     .action(async (opts: { extension: string[] }) => {
       const registry = new ToolRegistry();
+      const events = new EventRouter();
       for (const path of opts.extension) {
-        await loadExtension(resolveExtensionPath(path), registry);
+        await loadExtension(resolveExtensionPath(path), registry, events);
       }
-      const server = createServer(registry);
+      const server = createServer(registry, events);
       const transport = new StdioServerTransport();
       await server.connect(transport);
     });

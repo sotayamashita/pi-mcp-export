@@ -1186,4 +1186,355 @@ describe("dispatchTool", () => {
     expect(observedContent).toEqual([{ type: "text", text: "kaboom" }]);
     expect(result).toEqual({ content: [{ type: "text", text: "handled gracefully" }] });
   });
+
+  it("returns an MCP error when execute exceeds timeoutMs and propagates abort via ctx.signal", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "slow",
+      parameters: Type.Object({}),
+      async execute(_toolCallId, _params, signal) {
+        observedSignal = signal;
+        await new Promise((resolve) => {
+          signal.addEventListener("abort", () => resolve(undefined), { once: true });
+        });
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "slow",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        timeoutMs: 50,
+      },
+    );
+
+    expect(observedSignal?.aborted).toBe(true);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringMatching(/timed out/i) }],
+    });
+  });
+
+  it("enforces timeoutMs when a tool_call hook hangs before execute runs", async () => {
+    const events = new EventRouter();
+    events.on("tool_call", () => new Promise(() => {}));
+    const execute = vi.fn();
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "wrapped",
+      parameters: Type.Object({}),
+      execute,
+    } satisfies ToolDef);
+
+    const start = Date.now();
+    const result = await dispatchTool(
+      registry,
+      "wrapped",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        timeoutMs: 50,
+        events,
+      },
+    );
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(1000);
+    expect(execute).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringMatching(/timed out/i) }],
+    });
+  });
+
+  it("enforces timeoutMs even when the tool ignores the signal entirely", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "uncooperative",
+      parameters: Type.Object({}),
+      async execute() {
+        await new Promise((resolve) => setTimeout(resolve, 60000));
+        return { content: [{ type: "text", text: "never reached" }] };
+      },
+    } satisfies ToolDef);
+
+    const start = Date.now();
+    const result = await dispatchTool(
+      registry,
+      "uncooperative",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        timeoutMs: 50,
+      },
+    );
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(1000);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringMatching(/timed out/i) }],
+    });
+  });
+
+  it("short-circuits when a tool_result hook hangs after execute already timed out", async () => {
+    const events = new EventRouter();
+    events.on("tool_result", () => new Promise(() => {}));
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "slow-then-hang",
+      parameters: Type.Object({}),
+      async execute(_toolCallId, _params, signal) {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return { content: [{ type: "text", text: "unreachable" }] };
+      },
+    } satisfies ToolDef);
+
+    const start = Date.now();
+    const result = await dispatchTool(
+      registry,
+      "slow-then-hang",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        timeoutMs: 50,
+        events,
+      },
+    );
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(1000);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringMatching(/timed out/i) }],
+    });
+  });
+
+  it("preserves the timeout error even when a tool_result hook tries to override it", async () => {
+    const events = new EventRouter();
+    events.on("tool_result", () => ({
+      content: [{ type: "text", text: "normalized success" }],
+      isError: false,
+    }));
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "slow-overridden",
+      parameters: Type.Object({}),
+      async execute(_toolCallId, _params, signal) {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return { content: [{ type: "text", text: "never" }] };
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "slow-overridden",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        timeoutMs: 50,
+        events,
+      },
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringMatching(/timed out/i) }],
+    });
+  });
+
+  it("still invokes later tool_result hooks when the timeout fires mid-hook", async () => {
+    const events = new EventRouter();
+    events.on("tool_result", () => new Promise(() => {}));
+    const secondHook = vi.fn();
+    events.on("tool_result", secondHook);
+
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "quick",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "quick",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        timeoutMs: 50,
+        events,
+      },
+    );
+
+    expect(secondHook).toHaveBeenCalledTimes(1);
+    const firstCall = secondHook.mock.calls[0] as unknown as ReadonlyArray<{ isError: boolean }>;
+    expect(firstCall[0]?.isError).toBe(true);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringMatching(/timed out/i) }],
+    });
+  });
+
+  it("stops forwarding progress notifications after the tool has timed out", async () => {
+    const sendProgress = vi.fn();
+    const progressFromTool: Array<() => void> = [];
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "ghost",
+      parameters: Type.Object({}),
+      async execute(_toolCallId, _params, _signal, onUpdate) {
+        onUpdate({ details: { phase: "one" } });
+        await new Promise<void>((resolve) => {
+          progressFromTool.push(() => {
+            onUpdate({ details: { phase: "late-after-timeout" } });
+            resolve();
+          });
+        });
+        return { content: [{ type: "text", text: "eventually" }] };
+      },
+    } satisfies ToolDef);
+
+    const dispatchPromise = dispatchTool(
+      registry,
+      "ghost",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        timeoutMs: 50,
+        sendProgress,
+      },
+    );
+    const result = await dispatchPromise;
+
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringMatching(/timed out/i) }],
+    });
+    const progressCountBefore = sendProgress.mock.calls.length;
+    progressFromTool[0]?.();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sendProgress.mock.calls.length).toBe(progressCountBefore);
+  });
+
+  it("invokes tool_result handlers on timeout for audit but silently bounds slow handlers", async () => {
+    const events = new EventRouter();
+    events.on("tool_call", () => new Promise(() => {}));
+    const postHook = vi.fn(() => new Promise(() => {}));
+    events.on("tool_result", postHook);
+
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      const registry = new ToolRegistry();
+      registry.register({
+        name: "noisy",
+        parameters: Type.Object({}),
+        async execute() {
+          return { content: [{ type: "text", text: "ok" }] };
+        },
+      } satisfies ToolDef);
+
+      const result = await dispatchTool(
+        registry,
+        "noisy",
+        {},
+        {
+          signal: new AbortController().signal,
+          cwd: process.cwd(),
+          notify: () => {},
+          timeoutMs: 50,
+          events,
+        },
+      );
+
+      expect(postHook).toHaveBeenCalledTimes(1);
+      const firstCall = postHook.mock.calls[0] as unknown as ReadonlyArray<{ isError: boolean }>;
+      expect(firstCall[0]?.isError).toBe(true);
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: expect.stringMatching(/timed out/i) }],
+      });
+    } finally {
+      const writes = stderrSpy.mock.calls.map(([c]) => String(c));
+      stderrSpy.mockRestore();
+      expect(writes.some((w) => /handler for "tool_result" threw/.test(w))).toBe(false);
+    }
+  });
+
+  it("converts synchronous execute() throws into an MCP error result", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "sync-throw",
+      parameters: Type.Object({}),
+      execute: (() => {
+        throw new Error("sync boom");
+      }) as unknown as ToolDef["execute"],
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "sync-throw",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        timeoutMs: 5000,
+      },
+    );
+
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: "sync boom" }],
+    });
+  });
+
+  it("returns the normal result when execute finishes before timeoutMs elapses", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "fast",
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: "text", text: "done" }] };
+      },
+    } satisfies ToolDef);
+
+    const result = await dispatchTool(
+      registry,
+      "fast",
+      {},
+      {
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        notify: () => {},
+        timeoutMs: 5000,
+      },
+    );
+
+    expect(result).toEqual({ content: [{ type: "text", text: "done" }] });
+  });
 });

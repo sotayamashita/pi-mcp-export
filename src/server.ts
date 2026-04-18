@@ -10,6 +10,7 @@ import type { ProgressParams } from "@/types/progress-params.ts";
 
 export interface ServerOptions {
   cwd?: string;
+  perCallTimeoutMs?: number;
 }
 
 export function createServer(
@@ -57,6 +58,7 @@ export function createServer(
       sessionId,
       ...(sendProgress !== undefined && { sendProgress }),
       ...(events !== undefined && { events }),
+      ...(options.perCallTimeoutMs !== undefined && { timeoutMs: options.perCallTimeoutMs }),
     });
   });
 

@@ -7,6 +7,7 @@ import type { ProgressParams } from "@/types/progress-params.ts";
 
 const FALLBACK_PROGRESS_MESSAGE = "progress update";
 const FLUSH_TIMEOUT_MS = 5000;
+const POST_HOOK_BUDGET_MS = 100;
 
 export interface DispatchOptions {
   signal: AbortSignal;
@@ -15,6 +16,7 @@ export interface DispatchOptions {
   sessionId?: string;
   sendProgress?: (params: ProgressParams) => void | Promise<void>;
   events?: EventRouter;
+  timeoutMs?: number;
 }
 
 interface ToolCallEvent {
@@ -93,6 +95,28 @@ function progressMessage(partial: unknown): string {
   return phase ?? elapsed ?? FALLBACK_PROGRESS_MESSAGE;
 }
 
+function withBudget<T>(p: Promise<T>, budgetMs: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("post-hook budget exceeded")), budgetMs);
+      t.unref?.();
+    }),
+  ]);
+}
+
+function rejectOnAbort(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("dispatch aborted by timeout"));
+      return;
+    }
+    signal.addEventListener("abort", () => reject(new Error("dispatch aborted by timeout")), {
+      once: true,
+    });
+  });
+}
+
 function extractExplicitProgress(partial: unknown): ProgressParams | null {
   if (typeof partial !== "object" || partial === null || !("progress" in partial)) return null;
   const progress = partial.progress;
@@ -114,8 +138,24 @@ export async function dispatchTool(
   let highestSynthesized = 0;
   let progressChain: Promise<unknown> = Promise.resolve();
   let hasPending = false;
+
+  const timeoutMs = opts.timeoutMs;
+  let timeoutController: AbortController | undefined;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let effectiveSignal = opts.signal;
+  if (timeoutMs !== undefined && timeoutMs > 0) {
+    const ctrl = new AbortController();
+    timeoutController = ctrl;
+    effectiveSignal = AbortSignal.any([opts.signal, ctrl.signal]);
+    timeoutHandle = setTimeout(() => ctrl.abort(), timeoutMs);
+    timeoutHandle.unref?.();
+  }
+  const raceTimeout = <T>(p: Promise<T>): Promise<T> =>
+    timeoutController ? Promise.race([p, rejectOnAbort(timeoutController.signal)]) : p;
+  const timeoutMessage = (): string => `Tool execution timed out after ${(timeoutMs ?? 0) / 1000}s`;
   const onUpdate = (partial: unknown): void => {
     if (!sendProgress) return;
+    if (timeoutController?.signal.aborted) return;
     const explicit = extractExplicitProgress(partial);
     let params: ProgressParams;
     if (explicit) {
@@ -131,7 +171,7 @@ export async function dispatchTool(
   try {
     const ctx = createExecuteContext({
       cwd: opts.cwd,
-      signal: opts.signal,
+      signal: effectiveSignal,
       notify: opts.notify,
       ...(opts.sessionId !== undefined && { sessionId: opts.sessionId }),
     });
@@ -142,6 +182,7 @@ export async function dispatchTool(
     let details: unknown;
     let isError = false;
     let blocked = false;
+    let timedOut = false;
 
     if (opts.events) {
       const callEvent: ToolCallEvent = {
@@ -153,8 +194,15 @@ export async function dispatchTool(
       for (const handler of opts.events.handlersOf("tool_call")) {
         let r: unknown;
         try {
-          r = await handler(callEvent, ctx);
+          r = await raceTimeout(Promise.resolve(handler(callEvent, ctx)));
         } catch (err) {
+          if (timeoutController?.signal.aborted) {
+            content = [{ type: "text", text: timeoutMessage() }];
+            isError = true;
+            blocked = true;
+            timedOut = true;
+            break;
+          }
           const message = err instanceof Error ? err.message : String(err);
           process.stderr.write(`[pi-mcp-export] handler for "tool_call" threw: ${message}\n`);
           content = [{ type: "text", text: `Tool execution was blocked: ${message}` }];
@@ -178,15 +226,31 @@ export async function dispatchTool(
         content = [{ type: "text", text: `unknown tool "${name}"` }];
         isError = true;
       } else {
+        let executePromise: Promise<{ content: CallToolResult["content"]; details?: unknown }>;
         try {
-          const executeResult = await tool.execute(toolCallId, input, opts.signal, onUpdate, ctx);
+          executePromise = Promise.resolve(
+            tool.execute(toolCallId, input, effectiveSignal, onUpdate, ctx),
+          );
+        } catch (err) {
+          executePromise = Promise.reject(err);
+        }
+        try {
+          const executeResult = await raceTimeout(executePromise);
           content = executeResult.content;
           details = executeResult.details;
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          content = [{ type: "text", text: message }];
-          isError = true;
+          if (timeoutController?.signal.aborted) {
+            content = [{ type: "text", text: timeoutMessage() }];
+            details = undefined;
+            isError = true;
+            timedOut = true;
+          } else {
+            const message = err instanceof Error ? err.message : String(err);
+            content = [{ type: "text", text: message }];
+            isError = true;
+          }
         }
+        executePromise.catch(() => {});
       }
     }
 
@@ -196,20 +260,35 @@ export async function dispatchTool(
         toolCallId,
         toolName: name,
         input: inputSnapshot,
-        content: blocked ? cloneContent(content) : content,
-        details: blocked ? cloneDetails(details) : details,
+        content: blocked || timedOut ? cloneContent(content) : content,
+        details: blocked || timedOut ? cloneDetails(details) : details,
         isError,
       };
       for (const handler of opts.events.handlersOf("tool_result")) {
         let r: unknown;
         try {
-          r = await handler(resultEvent, ctx);
+          if (timedOut) {
+            r = await withBudget(Promise.resolve(handler(resultEvent, ctx)), POST_HOOK_BUDGET_MS);
+          } else {
+            r = await raceTimeout(Promise.resolve(handler(resultEvent, ctx)));
+          }
         } catch (err) {
+          if (timedOut) continue;
+          if (timeoutController?.signal.aborted) {
+            content = [{ type: "text", text: timeoutMessage() }];
+            details = undefined;
+            isError = true;
+            timedOut = true;
+            resultEvent.content = cloneContent(content);
+            resultEvent.details = cloneDetails(details);
+            resultEvent.isError = true;
+            continue;
+          }
           const message = err instanceof Error ? err.message : String(err);
           process.stderr.write(`[pi-mcp-export] handler for "tool_result" threw: ${message}\n`);
           continue;
         }
-        if (blocked) continue;
+        if (blocked || timedOut) continue;
         if (typeof r !== "object" || r === null) continue;
         if ("content" in r) {
           resultEvent.content = (r as { content: CallToolResult["content"] }).content;
@@ -217,7 +296,7 @@ export async function dispatchTool(
         if ("details" in r) resultEvent.details = (r as { details: unknown }).details;
         if ("isError" in r) resultEvent.isError = Boolean((r as { isError: unknown }).isError);
       }
-      if (!blocked) {
+      if (!blocked && !timedOut) {
         content = resultEvent.content;
         details = resultEvent.details;
         isError = resultEvent.isError;
@@ -232,7 +311,8 @@ export async function dispatchTool(
       }),
     };
   } finally {
-    if (hasPending) {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (hasPending && !timeoutController?.signal.aborted) {
       await Promise.race([
         progressChain,
         new Promise<void>((resolve) => {

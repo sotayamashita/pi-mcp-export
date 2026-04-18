@@ -3,6 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { ToolRegistry } from "@/registry/tool-registry.ts";
 import { EventRouter } from "@/registry/event-router.ts";
 import { createExtensionApi } from "./extension-api.ts";
+import { LoadDiagnostics } from "./load-diagnostics.ts";
 import type { ToolDef } from "@/types/tool-def.ts";
 
 afterEach(() => {
@@ -71,5 +72,53 @@ describe("createExtensionApi", () => {
       api.registerShortcut("ctrl+x", { description: "x", handler: async () => {} }),
     ).not.toThrow();
     expect(stderrSpy).toHaveBeenCalledWith(expect.stringMatching(/registerShortcut/));
+  });
+
+  it("records an unsupported-event diagnostic when on() targets a non-fire event, and still registers the handler", () => {
+    const router = new EventRouter();
+    const diagnostics = new LoadDiagnostics();
+    const api = createExtensionApi(new ToolRegistry(), router, diagnostics);
+    const handler = vi.fn();
+
+    api.on("agent_start", handler);
+
+    const entries = diagnostics.list();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      kind: "unsupported-event",
+      event: "agent_start",
+    });
+    expect(router.handlersOf("agent_start")).toContain(handler);
+  });
+
+  it("records an unknown-event diagnostic when on() targets a name outside the support policy", () => {
+    const diagnostics = new LoadDiagnostics();
+    const api = createExtensionApi(new ToolRegistry(), new EventRouter(), diagnostics);
+
+    api.on("session_strat", () => {});
+
+    expect(diagnostics.list()).toEqual([{ kind: "unknown-event", event: "session_strat" }]);
+  });
+
+  it("does not record a diagnostic when on() targets a supported event", () => {
+    const diagnostics = new LoadDiagnostics();
+    const api = createExtensionApi(new ToolRegistry(), new EventRouter(), diagnostics);
+
+    api.on("tool_call", () => {});
+    api.on("session_start", () => {});
+
+    expect(diagnostics.list()).toEqual([]);
+  });
+
+  it("records an unsupported-api diagnostic with key metadata for registerShortcut", () => {
+    vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const diagnostics = new LoadDiagnostics();
+    const api = createExtensionApi(new ToolRegistry(), new EventRouter(), diagnostics);
+
+    api.registerShortcut("cmd+K", { description: "palette", handler: async () => {} });
+
+    expect(diagnostics.list()).toEqual([
+      { kind: "unsupported-api", api: "registerShortcut", meta: { key: "cmd+K" } },
+    ]);
   });
 });

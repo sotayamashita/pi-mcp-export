@@ -1,11 +1,30 @@
 {
+  "name": "pi-mcp-export",
+  "version": "0.1.0",
+  "bin": {
+    "pi-mcp-export": "./bin/pi-mcp-export.mjs"
+  },
+  "type": "module",
   "scripts": {
-    "prepare": "husky"
+    "prepare": "husky",
+    "test": "vitest run  --coverage",
+    "typecheck": "tsc --noEmit",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint --deny-warnings --report-unused-disable-directives",
+    "lint:fix": "oxlint --fix --report-unused-disable-directives"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@sinclair/typebox": "0.34.49",
+    "commander": "14.0.3",
+    "jiti": "2.6.1"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.5.0",
     "@commitlint/config-conventional": "^20.5.0",
     "@secretlint/secretlint-rule-preset-recommend": "^11.7.1",
+    "@types/node": "25.6.0",
     "@vitest/coverage-v8": "^4.1.4",
     "husky": "^9.1.7",
     "nano-staged": "^1.0.2",

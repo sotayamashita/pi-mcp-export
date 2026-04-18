@@ -678,3 +678,64 @@ inspect options:
 | 2026-04-17 | UI 系・キーバインド・モデル制御は非対応で割り切る                                                                                                                  | MCP のスコープ外、対応しようとすると責務が肥大化（詳細は §5）                                                                                                                                                                                                                                                                                                                                                                    |
 | 2026-04-17 | SKILL.md 部分は別扱い（本プロジェクトのスコープ外）                                                                                                                | pi-autoresearch の SKILL.md は agentskills.io 標準準拠で、`~/.hermes/skills/` 直置きで動作する。本プロジェクトは TS 拡張部分のみ対象                                                                                                                                                                                                                                                                                             |
 | 2026-04-18 | §6.1 の工数見積もり自己正当化（±30% ブレ幅の 3 要因加算表・±20% では足りない理由・±50% は過大な理由）を削除し、「Phase 1 完了時に実績で reforecast」方針に置き換え | 実装前の LLM 生成見積もりは reference class の裏付けを持たず、内部推論による自己正当化は confabulation と区別がつかない（別セッションで同じプロンプトを投げれば ±25% でも ±40% でも同じ文体で正当化される）。McConnell の Cone of Uncertainty、Kahneman の planning fallacy、No Estimates 派（Duarte/Holub）が揃って inside view を警告する。判断に効くのは非対称な境界（§0.4 の撤退閾値）であり、点推定の精度は実績で上書きする |
+| 2026-04-18 | TypeBox → JSON Schema 変換は kind 別分岐を止め `JSON.parse(JSON.stringify(schema))` + `[Kind]` 存在チェックに統一                                                  | §12.1。TypeBox 0.34.x は `[Kind]` Symbol を除けば JSON Schema を直接出力しており、§4.1 policy 1「標準コンストラクタはそのまま透過」を最短で実現できる。Phase 2 の Array/Union/Optional/Literal も追加コードなしで透過する。代償: 未知型検出が「TypeBox 以外」単位になり spec §4.1 の「個別 kind の未知」粒度は失う（実害なし）                                                                                                   |
+| 2026-04-18 | `--extension` は commander の collector で repeatable、default 値は渡さない                                                                                        | §12.4。`requiredOption` に default 配列を渡すと required 判定が殺される commander 仕様。default なし + collector 側で `previous === undefined` を吸収することで spec §6.3「複数指定可」を Phase 1 から満たす                                                                                                                                                                                                                     |
+| 2026-04-18 | Loader は `existsSync` でエントリ存在を先に確認し、不在は `Extension file not found:` で包む。それ以外の jiti エラーは verbatim で propagate                       | §12.5。/simplify で一度削除したが /codex:review で「jiti の MODULE_NOT_FOUND は拡張の内部 import 失敗でも出る」ことが判明して復活。TOCTOU より診断可能性を優先                                                                                                                                                                                                                                                                   |
+| 2026-04-18 | `package.json.bin.pi-mcp-export: ./bin/pi-mcp-export.mjs` を宣言                                                                                                   | spec §1.4 成功条件 1「`pi-mcp-export serve --extension <path>` で起動」を `npm install -g` 経由で満たすため。静的テスト (`tests/package-bin.test.ts`) で bin マップと target の実在を検証                                                                                                                                                                                                                                        |
+| 2026-04-18 | `--extension <path>` の `<path>` がディレクトリのとき `<path>/index.ts` に解決する                                                                                 | spec §6.3 は file/directory 扱いを未指定。pi 本体が `~/.pi/agent/extensions/<name>/index.ts` 規約なので合わせる。エラーは `ENOENT` のみ握りつぶし、それ以外（EACCES 等）は propagate                                                                                                                                                                                                                                             |
+| 2026-04-18 | jiti の `@/*` alias は `bin/pi-mcp-export.mjs` で明示注入                                                                                                          | §12.2。jiti 2.x は tsconfig `paths` を自動読み取りしないため。拡張側で絶対 import を許したければ同じ alias 注入が必要                                                                                                                                                                                                                                                                                                            |
+
+## 11. 進捗 (Progress)
+
+**最終更新:** 2026-04-18 / **現在位置:** Phase 1 完了、Phase 2 未着手。
+
+### 完了済み (Phase 0-1)
+
+- **リポジトリ足場**: pnpm / husky / commitlint / secretlint / oxfmt / oxlint / vitest / nano-staged / TypeScript（strict + exactOptionalPropertyTypes 等）、Node 20+ LTS ESM、`@types/node` exact pin
+- **CLI**: `pi-mcp-export serve --extension <path>` 動作。`--extension` は繰り返し可（複数拡張同時 load）。`package.json.bin` で `npm install -g` から起動可能
+- **ExtensionAPI カバー範囲**:
+  - `pi.registerTool(def)` の受付と MCP `tools/list` / `tools/call` への露出
+  - TypeBox → JSON Schema 変換（実装は §12.1 の透過方式により Phase 2 の Array/Union/Optional/Literal も自動対応）
+  - `registerShortcut` = no-op + stderr 警告（未対応 API プロトタイプ）
+  - jiti 経由の拡張評価、`bin/pi-mcp-export.mjs` で `@/*` alias 注入
+  - stdio MCP サーバ、in-memory 統合テスト、`child_process` による CLI e2e
+- **検証**: 8 テストファイル / 23 ケース GREEN、`pnpm typecheck` エラー 0、`pnpm lint` 警告 0
+
+### 未実装（Phase 2 以降）
+
+spec §6.1 の Phase 2-7 は未着手。直近のネクストは **Phase 2 = pi-autoresearch 実拡張で E2E 通す**。Phase 1 終了時点での reforecast は Phase 2 完了後に §0.4 撤退条件表と照合する。
+
+### トラッキング資料
+
+- `test-list.md` — テストケース 1–20 の実装状況
+- `/Users/sotayamashita/.claude/plans/eventual-sniffing-glacier.md` — Phase 1 実装プラン
+- `@10 決定ログ` — 日付順の決定履歴
+- `@12 Surprises & Discoveries` — 実装で判明した spec 設計時点の未見通し事項
+
+## 12. Surprises & Discoveries
+
+実装で判明した、spec 作成時点では見通せなかった事実。以降のフェーズ設計と Phase 1 の決定ログ (§10) の参照先。
+
+### 12.1 TypeBox schemas are already JSON Schema at runtime
+
+§4.1 は kind ごとの変換ロジックを要求していたが、TypeBox 0.34.x が出力するオブジェクトは `[Kind]` Symbol を除けばそのまま JSON Schema 形式。実装は `JSON.parse(JSON.stringify(schema))` + `[Kind]` 存在チェックに収束した（Symbol キーは JSON 直列化で自動的に落ちる）。副次効果として Phase 2 に送ったはずの Array / Optional / Union / Literal も追加コードなしで透過する。§4.1 の「policy 1: 標準コンストラクタはそのまま透過」を文字通り最小コストで実現できた。
+
+### 12.2 jiti does not auto-read tsconfig paths
+
+pi 本体と同じランタイム（jiti）を採用したが、jiti 2.x は tsconfig の `paths` を自動読み取りしない。`@/*` alias は `bin/pi-mcp-export.mjs` の `createJiti(url, {alias: {"@": srcRoot}})` で明示注入。Phase 2 以降で拡張側も絶対 import を許可したいなら同じ注入が必要。
+
+### 12.3 MCP SDK v1.29.0 root export is broken
+
+`import "@modelcontextprotocol/sdk"` は `ERR_MODULE_NOT_FOUND` で失敗する（`dist/esm/index.js` が未ビルド）。subpath 経由に統一した: `/server`, `/client`, `/types.js`, `/server/stdio.js`, `/client/stdio.js`, `/inMemory.js`。§7 リスク表（pi/ExtensionAPI 型の破壊的変更）と同類の上流リスクがあり、peerDependency ピン時に副次影響を受ける可能性。
+
+### 12.4 Commander's `requiredOption` is silently satisfied by a collector default
+
+`--extension` を繰り返し可にするため commander に collector 関数を渡したが、同時に default 値 `[]` を渡すと `requiredOption` が「既定値あり = 満たされた」と判定し、引数省略時のエラーが出なくなる。default を渡さず collector 側で `previous === undefined` を吸収する形で解決。テストケース 20（`--extension` 未指定で非ゼロ終了）が一旦タイムアウトで落ちて判明した。
+
+### 12.5 Loader error fidelity requires a pre-existence check
+
+/simplify フェーズで「jiti の `MODULE_NOT_FOUND` はパスを含むので `existsSync` 事前チェックは不要」と判断して削除した。その後 /codex:review で「jiti は拡張の _内部_ import 解決失敗でも同じ `MODULE_NOT_FOUND` を投げる」ことが判明。内部失敗を "Extension file not found" に書き換えるとユーザーがデバッグできない。`existsSync` を復活させてエントリ欠落のみ wrap、jiti のその他エラーは verbatim で propagate する構造に戻した。TOCTOU の懸念より診断可能性を優先。review 層を重ねたことで改善方針同士の衝突を検出できた事例。
+
+### 12.6 ExtensionAPI type drift risk in fixtures
+
+当初 fixture は `ExtensionApiLike` として ExtensionAPI 形状を手書きしていたが、本体の `ExtensionApi` が進化すると fixture が silent drift する（§6.2 のテスト戦略における fixture 品質リスク）。`import type { ExtensionApi } from "@/api-mock/extension-api.ts"` で本体型と結合する形に統一。jiti の alias 注入（§12.2）がこの import を解決する。

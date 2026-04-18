@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | xargs pnpm oxfmt || true",
+            "statusMessage": "Formatting edited file with oxfmt ..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | xargs pnpm oxlint || true",
+            "statusMessage": "Linting edited file with oxlint ..."
+          }
+        ]
+      }
+    ]
+  }
+}

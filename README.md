@@ -6,7 +6,7 @@ Point it at a pi extension; any MCP client (Claude Desktop, Cursor, Codex, Herme
 
 ## Requirements
 
-- Node.js 20+
+- [mise](https://mise.jdx.dev/) — picks up `node` (LTS) and `pnpm` from [`mise.toml`](mise.toml)
 - A pi extension (a `.ts` file, or a directory with `index.ts`)
 
 ## Quick start

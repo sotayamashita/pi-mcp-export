@@ -157,5 +157,11 @@ skills-lock.json
 # Local TDD tracking (not part of the shipped project)
 test-list.md
 
+# Local indubitable file (not part of the shipped project)
+.indubitable
+
+# Ignore the end-to-end test file for pi-autoresearch, which is not part of the shipped project
+tests/e2e/pi-autoresearch.test.ts
+
 # Ignore
 spec.md

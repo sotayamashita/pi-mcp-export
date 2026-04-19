@@ -156,3 +156,6 @@ skills-lock.json
 
 # Local TDD tracking (not part of the shipped project)
 test-list.md
+
+# Ignore
+spec.md

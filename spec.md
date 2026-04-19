@@ -887,7 +887,7 @@ spec §4.4 は `tool_call` を "block 判定を尊重" と `tool_result` を "mo
 spec §6.3 は `--timeout <sec>` の適用境界と fallback を定義していない。Codex review 12 ラウンドで徐々に明らかになった設計要求:
 
 | 問題領域                     | 素朴案                                   | 問題点                                                     | 最終解                                                                |
-| ---------------------------- | ---------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------- | -------- | ----------------------------- |
+| ---------------------------- | ---------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------- |
 | execute が signal を無視     | `await execute(...)` 後に timeout check  | tool が signal を無視すると dispatch が無限 hang           | `Promise.race([execute, rejectOnAbort(timeoutSignal)])`               |
 | pre-hook hang                | execute だけ race                        | 悪意ある policy handler が dispatch を止められる           | pre-hook ループも `raceTimeout` で wrap                               |
 | post-hook hang               | post-hook は race しない                 | slow audit handler が response を遅延                      | post-hook も race、ただし timeout 後は individual 100ms budget に切替 |
@@ -898,7 +898,7 @@ spec §6.3 は `--timeout <sec>` の適用境界と fallback を定義してい�
 | AbortSignal.any の再 listen  | `rejectOnAbort` が future event だけ待つ | 既に aborted な signal で永久待機                          | `if (signal.aborted) reject immediately`                              |
 | default 300 の破壊性         | spec 通り 300                            | 既存拡張の長時間 tool（`run_experiment` 等）が silent fail | default 0 に変更、明示 opt-in を要求                                  |
 | sub-ms timeout               | `Math.round(sec*1000)` で 0.0004→0       | 微小値 が disabled と区別不能                              | `0 < sec < 0.001` は reject                                           |
-| 単位付き `1ms`               | `Number.parseFloat("1ms") === 1`         | 単位 typo が silent に 1 秒扱い                            | `/^(?:\d+                                                             | \d+\.\d+ | \.\d+)$/` regex で事前 reject |
+| 単位付き `1ms`               | `Number.parseFloat("1ms") === 1`         | 単位 typo が silent に 1 秒扱い                            | `/^(?:\d+\|\d+\.\d+\|\.\d+)$/` regex で事前 reject                    |
 | 複数 extension strict 出力   | flat な diagnostic list                  | どの extension が原因か不明                                | per-extension `LoadDiagnostics` + path prefix でグルーピング          |
 | unknown event の silent 登録 | SUPPORTED/UNSUPPORTED マッチのみ記録     | `session_strat` typo が strict をスルー                    | 第三カテゴリ `unknown-event` diagnostic として明示化                  |
 | command 分類の prefix 依存   | `name.startsWith("command_")`            | `registerTool({name: "command_status"})` を command 誤認   | `createExtensionApi` に optional `commandNames: Set<string>` を通す   |

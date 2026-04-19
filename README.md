@@ -1,15 +1,15 @@
 # pi-mcp-export
 
+> [!WARNING]
+> **Status: proof of concept.** Not published to npm yet, no tagged releases, and the CLI surface may change without notice. Run from a local checkout and expect rough edges while the API stabilizes.
+
 ### Expose pi extensions as MCP servers
 
 **[Install](#install)** · **[Usage](#usage)** · **[How it works](#how-it-works)**
 
-_Point it at a pi extension; any MCP client can call its tools and commands._
+> _Point it at a pi extension; any MCP client can call its tools and commands._
 
 An adapter for **[pi](https://pi.dev/)** — an AI coding agent that runs in your terminal. pi extensions are TypeScript modules that register tools, commands, and event hooks. `pi-mcp-export` loads an extension and exposes it as an [MCP](https://modelcontextprotocol.io/) stdio server, so the same extension works in Claude Desktop, Cursor, Codex, Hermes, and any other MCP-compatible client — no per-client rewrite.
-
-> [!WARNING]
-> **Status: proof of concept.** Not published to npm yet, no tagged releases, and the CLI surface may change without notice. Run from a local checkout and expect rough edges while the API stabilizes.
 
 ---
 
@@ -24,7 +24,7 @@ node bin/pi-mcp-export.mjs serve --extension /path/to/extension
 
 ## What's included
 
-|               |                                                                             |
+| Command       | Description                                                                 |
 | ------------- | --------------------------------------------------------------------------- |
 | **`serve`**   | MCP stdio server that mirrors a pi extension's tools, commands, and hooks   |
 | **`inspect`** | Pre-flight report of what an extension registers and what the adapter skips |

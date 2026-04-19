@@ -40,8 +40,6 @@ node bin/pi-mcp-export.mjs inspect --extension /path/to/extension
 }
 ```
 
-See [`examples/`](examples/) for per-client snippets.
-
 ## CLI
 
 ```
